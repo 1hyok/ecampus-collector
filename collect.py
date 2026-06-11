@@ -294,8 +294,13 @@ def save_login():
     pw = getpass.getpass("eCampus 비밀번호(입력 안 보임): ")
     if not uid or not pw:
         sys.exit("아이디/비밀번호가 비었습니다.")
-    subprocess.run(["security", "add-generic-password", "-U",
-                    "-s", KEYCHAIN_SERVICE, "-a", uid, "-w", pw], check=True)
+    # 비밀번호를 '-w PW' 인자로 주면 잠깐이라도 ps/프로세스목록에 노출된다.
+    # -w 를 값 없이 주면 security 가 stdin 으로 비밀번호를 읽어 인자 노출을 피한다.
+    r = subprocess.run(["security", "add-generic-password", "-U",
+                        "-s", KEYCHAIN_SERVICE, "-a", uid, "-w"],
+                       input=pw, text=True, capture_output=True)
+    if r.returncode != 0:
+        sys.exit(f"키체인 저장 실패: {r.stderr.strip()}")
     print(f"✓ 키체인에 저장했습니다 (service={KEYCHAIN_SERVICE}, account={uid})")
     print("  이제 ./ec 실행 시 자동 로그인합니다.")
 
@@ -305,6 +310,19 @@ def is_logged_in(page) -> bool:
         return "로그아웃" in (page.locator("body").inner_text(timeout=4000) or "")
     except Exception:
         return False
+
+
+def wait_logged_in(page, timeout_ms: int = 12000) -> bool:
+    """로그인 완료를 폴링으로 기다린다. ilos loginForm() 은 JSONP $.ajax 후
+    success 콜백에서 location.href 로 리다이렉트하므로 완료 시점이 비결정적 —
+    고정 sleep 대신 '로그아웃' 텍스트가 뜰 때까지(또는 timeout) 0.5초 간격 확인."""
+    waited = 0
+    while waited < timeout_ms:
+        if is_logged_in(page):
+            return True
+        page.wait_for_timeout(500)
+        waited += 500
+    return is_logged_in(page)
 
 
 def auto_login(page) -> bool:
@@ -326,8 +344,7 @@ def auto_login(page) -> bool:
         except Exception:
             pass
         page.evaluate("() => loginForm()")   # 실패 alert 는 Playwright 가 자동 dismiss
-        page.wait_for_timeout(2500)
-        ok = is_logged_in(page)
+        ok = wait_logged_in(page, 12000)     # 고정 sleep 금지 — 리다이렉트까지 폴링
         print("✓ 자동 로그인 성공" if ok
               else "✗ 자동 로그인 실패 — 아이디/비밀번호 확인 후 ./ec login 으로 재등록하거나 직접 로그인하세요.")
         return ok
@@ -428,6 +445,22 @@ def try_download(page, dl_page, post_url: str, att: dict, files_dir: Path, state
     token = att.get("token")
     if not token:
         return False, None, None
+    # 토큰 클릭은 dl_page 가 아닌 메인 page 에서 일어나므로, 세션 만료 alert 도
+    # page 쪽에서 뜬다. dl_page 의 dialog 핸들러가 못 잡으니, 여기서 일회용 핸들러를
+    # 달아 alert 메시지로 세션 만료를 감지한다(안 그러면 만료 후에도 글마다 헛시도).
+    seen = {"dead": False}
+
+    def _on_dialog(d):
+        try:
+            if _is_session_dead(d.message):
+                seen["dead"] = True
+        finally:
+            try:
+                d.dismiss()
+            except Exception:
+                pass
+
+    page.on("dialog", _on_dialog)
     try:
         if post_url.split("?")[0] not in page.url:
             page.goto(post_url, wait_until="domcontentloaded")
@@ -441,7 +474,24 @@ def try_download(page, dl_page, post_url: str, att: dict, files_dir: Path, state
         dl.save_as(str(dest))
         return True, str(dest), None
     except Exception:
+        cur = ""
+        try:
+            cur = page.url or ""
+        except Exception:
+            pass
+        if seen["dead"] or "main_form.acl" in cur or "login" in cur.lower():
+            return False, None, "session"
+        try:
+            if _is_session_dead(page.content()):
+                return False, None, "session"
+        except Exception:
+            pass
         return False, None, None
+    finally:
+        try:
+            page.remove_listener("dialog", _on_dialog)
+        except Exception:
+            pass
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -544,15 +594,14 @@ def post_dir_name(idx: int, post: dict) -> str:
 
 
 def load_downloaded_index(menu_dir: Path) -> dict:
-    """이전 실행이 남긴 posts/*/attachments.json에서 이미 받은 첨부를 모은다.
+    """이전 실행이 남긴 첨부 기록에서 이미 받은 첨부를 모은다.
     {parse.attachment_key(...): 파일 경로}. 게시물 폴더명이 바뀌었어도(조회수/순번)
-    FILE_SEQ·token이 같고 파일이 실제로 있으면 잡힌다 → 재다운로드 방지."""
+    FILE_SEQ·token이 같고 파일이 실제로 있으면 잡힌다 → 재다운로드 방지.
+    일반 게시물 첨부(attachments.json)와 팀프로젝트 제출 첨부(submission.json) 모두 포함 —
+    제출 첨부를 빠뜨리면 재실행마다 submission_files/ 에 _2,_3 사본이 쌓인다."""
     index = {}
-    for aj in sorted((menu_dir / "posts").glob("*/attachments.json")):
-        try:
-            records = json.loads(aj.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+
+    def absorb(records, base_dir: Path, files_subdir: str):
         for rec in records:
             if not rec.get("downloaded") or not rec.get("path"):
                 continue
@@ -561,9 +610,21 @@ def load_downloaded_index(menu_dir: Path) -> dict:
                 continue
             p = Path(rec["path"])
             if not p.exists():  # 기록은 실행 당시 CWD 기준 — 폴더 위치로 한 번 더 시도
-                p = aj.parent / "files" / Path(rec["path"]).name
+                p = base_dir / files_subdir / Path(rec["path"]).name
             if p.exists():
                 index[key] = str(p)
+
+    for aj in sorted((menu_dir / "posts").glob("*/attachments.json")):
+        try:
+            absorb(json.loads(aj.read_text(encoding="utf-8")), aj.parent, "files")
+        except Exception:
+            continue
+    for sj in sorted((menu_dir / "posts").glob("*/submission.json")):
+        try:
+            sub = json.loads(sj.read_text(encoding="utf-8"))
+            absorb(sub.get("attachments", []), sj.parent, "submission_files")
+        except Exception:
+            continue
     return index
 
 
@@ -580,16 +641,24 @@ def drill_post(page, menu_dir: Path, idx: int, post: dict, net_sink,
     capture(page, post_dir, net_sink, post["title"])
 
     # 팀프로젝트 게시물이면 팀룸 + 제출 레코드(제출일시/본문/첨부)까지 수집
+    on_post_page = True
     if "project_view_form" in post["url"]:
         collect_team_project(page, post_dir, net_sink, download, dl_page, state, dl_index)
-        try:   # 팀룸 이동으로 바뀐 페이지를 게시물로 복귀(첨부 파싱은 게시물 기준)
-            if post["url"].split("?")[0] not in page.url:
+        # 팀룸 이동으로 바뀐 페이지를 게시물로 복귀(첨부 파싱은 게시물 기준).
+        # 복귀가 실패하면 현재 페이지가 팀룸이라, 그 DOM을 게시물 첨부로 오인하면 안 된다
+        # → on_post_page=False 로 막아 게시물 첨부 파싱을 건너뛴다.
+        if post["url"].split("?")[0] not in page.url:
+            on_post_page = False
+            try:
                 page.goto(post["url"], wait_until="domcontentloaded")
                 page.wait_for_timeout(600)
-        except Exception:
-            pass
+                on_post_page = post["url"].split("?")[0] in page.url
+            except Exception:
+                pass
+            if not on_post_page:
+                print(f"     ⚠ 게시물 복귀 실패 — 팀룸 첨부 오인 방지를 위해 본문 첨부 파싱 생략")
 
-    atts = parse.extract_attachments(page.content(), page.url)
+    atts = parse.extract_attachments(page.content(), page.url) if on_post_page else []
     records = []
     got = skipped = 0
     for att in atts:
@@ -665,7 +734,8 @@ def collect_menu(page, label, url, net_sink, output_dir, download, max_posts, dl
 # ──────────────────────────────────────────────────────────────────────────
 # 모드: 수동 캡처 (라벨 입력 불필요, 1페이지)
 # ──────────────────────────────────────────────────────────────────────────
-def run_manual(context, net_sink, base_url, output_dir):
+def run_manual(context, net_sink, base_url, output_dir,
+               download=True, only=None, max_posts=40):
     page = active_page(context)
     goto_base_if_blank(page, base_url)
     if not is_logged_in(page):
@@ -688,7 +758,8 @@ def run_manual(context, net_sink, base_url, output_dir):
         if s.lower() in {"q", "quit", "exit"}:
             break
         if s.lower() == "auto":
-            run_auto(context, net_sink, base_url, output_dir)
+            run_auto(context, net_sink, base_url, output_dir,
+                     download=download, only=only, max_posts=max_posts)
             continue
 
         pg = active_page(context)
@@ -719,8 +790,14 @@ def run_auto(context, net_sink, base_url, output_dir,
     hands_free = False
     if not is_logged_in(page):
         auto_login(page)
+    # 사용자가 이미 과목 화면에 들어가 있으면 그 과목을 존중한다(자동 진입으로 덮어쓰지 않음).
+    # AUTO_COURSE 자동 진입은 '아직 어느 과목에도 안 들어간' 무인 시작일 때만.
+    already_in = is_logged_in(page) and bool(detect_course(page))
     auto_course = getattr(config, "AUTO_COURSE", None)
-    if auto_course and is_logged_in(page):
+    if already_in:
+        hands_free = True
+        print(f"✓ 이미 과목 화면 — 그대로 수집: {detect_course(page)}")
+    elif auto_course and is_logged_in(page):
         hands_free = enter_course(page, auto_course)
         if hands_free:
             print(f"✓ 과목 자동 진입: {auto_course}")
@@ -868,7 +945,9 @@ def main():
                          download=not args.no_download, only=args.menus,
                          max_posts=args.max_posts)
             else:
-                run_manual(context, net_sink, args.base, output_dir)
+                run_manual(context, net_sink, args.base, output_dir,
+                           download=not args.no_download, only=args.menus,
+                           max_posts=args.max_posts)
         finally:
             try:
                 context.close()

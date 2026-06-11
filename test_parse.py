@@ -138,14 +138,40 @@ class TestLoadDownloadedIndex(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             self.assertEqual(collect.load_downloaded_index(Path(td) / "없음"), {})
 
+    def test_indexes_team_project_submission_files(self):
+        """팀프로젝트 제출 첨부(submission.json)도 인덱스에 잡혀야 한다.
+        안 그러면 재실행마다 submission_files/ 에 _2,_3 사본이 쌓인다(회귀 방지)."""
+        with tempfile.TemporaryDirectory() as td:
+            menu = Path(td) / "팀프로젝트"
+            pdir = menu / "posts" / "10000000_프로젝트 #6"
+            (pdir / "submission_files").mkdir(parents=True)
+            f = pdir / "submission_files" / "소스코드.zip"
+            f.write_bytes(b"z" * 20)
+            sub = {"post_url": "http://x", "submitted": True,
+                   "attachments": [
+                       {"filename": "소스코드.zip", "token": None, "downloaded": True,
+                        "url": "http://x/efile_download.acl?FILE_SEQ=ZIPSEQ&ud=1",
+                        # 기록 path 는 옛 CWD 기준으로 깨져 있어도 폴백으로 찾아야 함
+                        "path": "output/딴데/posts/x/submission_files/소스코드.zip"},
+                       {"filename": "없어진것.pdf", "token": None, "downloaded": True,
+                        "url": "http://x/efile_download.acl?FILE_SEQ=MISSING&ud=1",
+                        "path": str(pdir / "submission_files" / "없어진것.pdf")},
+                   ]}
+            (pdir / "submission.json").write_text(
+                json.dumps(sub, ensure_ascii=False), encoding="utf-8")
+
+            idx = collect.load_downloaded_index(menu)
+            self.assertEqual(set(idx), {("file", "ZIPSEQ")})
+            self.assertEqual(idx[("file", "ZIPSEQ")], str(f))
+
 
 SUBMIT_POP_SAMPLE = """
 <html lang="ko">
 <script type="text/JavaScript">
 function insertGo(){
   $.ajax({ url: "/ilos/st/course/project_insert.acl", type: "POST",
-    data: { ud : "202111373", ky : "A20261BBAB590693222001", returnData : "json",
-      PROJECT_SEQ : "13429643", TEAM_CD : "143424", TXT : txt, encoding : "utf-8" },
+    data: { ud : "200000000", ky : "A00000000000000000000", returnData : "json",
+      PROJECT_SEQ : "10000000", TEAM_CD : "100000", TXT : txt, encoding : "utf-8" },
   });
 }
 </script>
@@ -162,7 +188,7 @@ function insertGo(){
   </table>
   <script>
   $.ajax({ url: "/ilos/co/efile_list.acl", type: "POST",
-    data: { CONTENT_SEQ : "ODLN4PSQND4THRURFSMWMIDWXU", encoding : "utf-8" },
+    data: { CONTENT_SEQ : "CONTENTSEQABC123", encoding : "utf-8" },
   });
   </script>
   <div class="site_button" id="uptBtn" title="수정">수정</div>
@@ -176,11 +202,11 @@ function showSubmitForm(){
     url: "/ilos/st/course/project_team_detail_submit_pop.acl",
     type: "POST",
     data: {
-      ud : "202111373",
-      ky : "A20261BBAB590693222001",
-      PROJECT_SEQ : "13429643",
-      TEAM_CD : "143424",
-      USER_ID : "202111373",
+      ud : "200000000",
+      ky : "A00000000000000000000",
+      PROJECT_SEQ : "10000000",
+      TEAM_CD : "100000",
+      USER_ID : "200000000",
       FLAG : "STU",
       encoding : "utf-8"
           },
@@ -188,19 +214,19 @@ function showSubmitForm(){
   });
 }
 </script>
-<a href="/ilos/st/course/project_team_detail_view_form.acl?PROJECT_SEQ=13429643&amp;TEAM_CD=143424&amp;SHARE_YN=N&amp;MY_TEAM_CD=143424&amp;display=1&amp;start=1&amp;week=">입장</a>
+<a href="/ilos/st/course/project_team_detail_view_form.acl?PROJECT_SEQ=10000000&amp;TEAM_CD=100000&amp;SHARE_YN=N&amp;MY_TEAM_CD=100000&amp;display=1&amp;start=1&amp;week=">입장</a>
 """
 
 
 class TestTeamProjectParsing(unittest.TestCase):
-    BASE = "http://ecampus.konkuk.ac.kr/ilos/st/course/project_view_form.acl?PROJECT_SEQ=13429643"
+    BASE = "http://ecampus.konkuk.ac.kr/ilos/st/course/project_view_form.acl?PROJECT_SEQ=10000000"
 
     def test_extract_submit_params(self):
         p = parse.extract_submit_params(PROJECT_VIEW_SAMPLE)
-        self.assertEqual(p["ud"], "202111373")
-        self.assertEqual(p["ky"], "A20261BBAB590693222001")
-        self.assertEqual(p["PROJECT_SEQ"], "13429643")
-        self.assertEqual(p["TEAM_CD"], "143424")
+        self.assertEqual(p["ud"], "200000000")
+        self.assertEqual(p["ky"], "A00000000000000000000")
+        self.assertEqual(p["PROJECT_SEQ"], "10000000")
+        self.assertEqual(p["TEAM_CD"], "100000")
         self.assertEqual(p["FLAG"], "STU")
 
     def test_extract_submit_params_absent(self):
@@ -209,25 +235,25 @@ class TestTeamProjectParsing(unittest.TestCase):
     def test_extract_team_room_url(self):
         u = parse.extract_team_room_url(PROJECT_VIEW_SAMPLE, self.BASE)
         self.assertIn("project_team_detail_view_form.acl", u)
-        self.assertIn("TEAM_CD=143424", u)
+        self.assertIn("TEAM_CD=100000", u)
         self.assertTrue(u.startswith("http://ecampus.konkuk.ac.kr/"))
 
     def test_team_room_url_prefers_my_team(self):
         html = """
-        <a href="/ilos/st/course/project_team_detail_view_form.acl?PROJECT_SEQ=1&TEAM_CD=999&MY_TEAM_CD=143424">다른팀</a>
-        <a href="/ilos/st/course/project_team_detail_view_form.acl?PROJECT_SEQ=1&TEAM_CD=143424&MY_TEAM_CD=143424">우리팀</a>
+        <a href="/ilos/st/course/project_team_detail_view_form.acl?PROJECT_SEQ=1&TEAM_CD=999&MY_TEAM_CD=100000">다른팀</a>
+        <a href="/ilos/st/course/project_team_detail_view_form.acl?PROJECT_SEQ=1&TEAM_CD=100000&MY_TEAM_CD=100000">우리팀</a>
         """
         u = parse.extract_team_room_url(html, self.BASE)
-        self.assertIn("TEAM_CD=143424&MY_TEAM_CD=143424", u)
+        self.assertIn("TEAM_CD=100000&MY_TEAM_CD=100000", u)
 
     def test_parse_submit_popup_submitted(self):
         r = parse.parse_submit_popup(SUBMIT_POP_SAMPLE)
         self.assertTrue(r["submitted"])
         self.assertEqual(r["submitted_at"], "2026.06.11 오후 10:31:40")
         self.assertEqual(r["body_text"], ".")
-        self.assertEqual(r["file_content_seq"], "ODLN4PSQND4THRURFSMWMIDWXU")
+        self.assertEqual(r["file_content_seq"], "CONTENTSEQABC123")
         # 본문 추출이 insertGo 쪽 PROJECT_SEQ 값에 오염되지 않아야 한다
-        self.assertNotIn("13429643", r["body_text"])
+        self.assertNotIn("10000000", r["body_text"])
 
     def test_parse_submit_popup_not_submitted(self):
         r = parse.parse_submit_popup("<div id='submit_div'>아직 제출 전</div>")
@@ -237,8 +263,8 @@ class TestTeamProjectParsing(unittest.TestCase):
     def test_efile_list_attachments(self):
         fl = """
         <div class="attfile-list">
-          <a class="site-link" href="/ilos/co/efile_download.acl?FILE_SEQ=FG34PIU6BLEEM&amp;CONTENT_SEQ=14140948&amp;ky=K&amp;ud=1&amp;pf_st_flag=">- 소스코드.zip (266.6KB)</a>
-          <a class="site-link" href="/ilos/co/efile_download.acl?FILE_SEQ=NXJWOESLFGHZK&amp;CONTENT_SEQ=14140948&amp;ky=K&amp;ud=1&amp;pf_st_flag=">- 보고서.pdf (1.3MB)</a>
+          <a class="site-link" href="/ilos/co/efile_download.acl?FILE_SEQ=FG34PIU6BLEEM&amp;CONTENT_SEQ=10000001&amp;ky=K&amp;ud=1&amp;pf_st_flag=">- 소스코드.zip (266.6KB)</a>
+          <a class="site-link" href="/ilos/co/efile_download.acl?FILE_SEQ=NXJWOESLFGHZK&amp;CONTENT_SEQ=10000001&amp;ky=K&amp;ud=1&amp;pf_st_flag=">- 보고서.pdf (1.3MB)</a>
         </div>"""
         atts = parse.extract_attachments(fl, self.BASE)
         self.assertEqual(len(atts), 2)

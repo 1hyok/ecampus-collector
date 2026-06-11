@@ -12,7 +12,9 @@
 고정하고 싶으면 그 값을 여기에 붙여넣으면 됩니다.
 """
 
-BASE_URL = "http://ecampus.konkuk.ac.kr/"
+# https 로 시작(평문 http 로 다니면 로그인 후 세션 쿠키가 평문으로 노출될 수 있음).
+# ilos 가 http 로 리다이렉트하는 경로가 있어도 시작점은 https 로 둔다.
+BASE_URL = "https://ecampus.konkuk.ac.kr/"
 
 # 자동 로그인(./ec login 으로 키체인에 자격증명 등록 후 동작)
 LOGIN_URL = "https://ecampus.konkuk.ac.kr/ilos/main/member/login_form.acl"
