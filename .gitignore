@@ -1,0 +1,12 @@
+# 개인 로그인 세션 (절대 커밋 금지)
+.auth/
+
+# 수집된 강의자료 (개인 자료)
+output/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
