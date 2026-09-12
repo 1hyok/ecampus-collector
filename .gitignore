@@ -4,6 +4,9 @@
 # 수집된 강의자료 (개인 자료)
 output/
 
+# 더블클릭 런처 앱 (빌드 산출물 — 소스는 ec-app.applescript)
+*.app/
+
 # Python
 .venv/
 venv/

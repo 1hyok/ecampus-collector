@@ -37,6 +37,7 @@ Konkuk e-campus(ilos) 수집기.
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -290,15 +291,22 @@ def save_login():
     """아이디/비밀번호를 macOS 키체인에 저장. 삭제는
     security delete-generic-password -s ecampus-collector"""
     import getpass
-    uid = input("eCampus 아이디(학번): ").strip()
+    uid = input("eCampus 아이디(평소 eCampus 로그인에 쓰는 아이디 — 포탈 계정과 연동): ").strip()
     pw = getpass.getpass("eCampus 비밀번호(입력 안 보임): ")
     if not uid or not pw:
         sys.exit("아이디/비밀번호가 비었습니다.")
-    # 비밀번호를 '-w PW' 인자로 주면 잠깐이라도 ps/프로세스목록에 노출된다.
-    # -w 를 값 없이 주면 security 가 stdin 으로 비밀번호를 읽어 인자 노출을 피한다.
-    r = subprocess.run(["security", "add-generic-password", "-U",
-                        "-s", KEYCHAIN_SERVICE, "-a", uid, "-w"],
-                       input=pw, text=True, capture_output=True)
+    # 비밀번호를 '-w PW' 인자로 주면 잠깐이라도 ps/프로세스목록에 노출되고,
+    # '-w'를 값 없이 주면 security 가 stdin 파이프를 무시하고 /dev/tty 에서
+    # "password data for new item:" 프롬프트로 입력을 다시 요구한다(tty 없으면
+    # 빈 비밀번호가 저장됨). security -i 대화형 모드는 명령 전체를 stdin 으로
+    # 받아 인자 노출도 추가 프롬프트도 없다. 따옴표·백슬래시만 이스케이프하면
+    # 되고, 줄바꿈은 input()/getpass() 가 받을 수 없어 고려 대상이 아니다.
+    def quote(s: str) -> str:
+        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    cmd = (f"add-generic-password -U -s {quote(KEYCHAIN_SERVICE)}"
+           f" -a {quote(uid)} -w {quote(pw)}\n")
+    r = subprocess.run(["security", "-i"],
+                       input=cmd, text=True, capture_output=True)
     if r.returncode != 0:
         sys.exit(f"키체인 저장 실패: {r.stderr.strip()}")
     print(f"✓ 키체인에 저장했습니다 (service={KEYCHAIN_SERVICE}, account={uid})")
@@ -330,6 +338,7 @@ def auto_login(page) -> bool:
     성공 여부 반환. 자격증명이 없으면 시도하지 않고 False."""
     uid, pw = keychain_creds()
     if not uid:
+        print("ℹ 키체인 미등록 — ./ec login 으로 등록하면 로그인부터 무인으로 돕니다.")
         return False
     try:
         page.goto(config.LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
@@ -628,9 +637,106 @@ def load_downloaded_index(menu_dir: Path) -> dict:
     return index
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# 잔재 폴더 정리
+#   초기 버전은 폴더명에 목록 행 꼬리표(작성자/조회수)가 그대로 들어가 조회수가
+#   바뀔 때마다 같은 글의 폴더가 새로 생겼다(예: '…조회 118' / '…조회 119').
+#   제목을 정리(clean_post_title)한 뒤에도 옛 폴더는 남으므로, meta.json의
+#   원본 제목(label)과 글 식별자(top_url)를 근거로 병합·개명해 잔재를 없앤다.
+# ──────────────────────────────────────────────────────────────────────────
+def _absorb_files(src_dir: Path, dst_dir: Path, actions: list):
+    """src 게시물 폴더의 다운로드 파일(files/, submission_files/) 중 dst에 없는 것을
+    옮긴다. 같은 이름·같은 크기면 동일 파일로 보고 버리고, 크기가 다르면 _2 로 보존.
+    캡처 산출물(page.html 등)은 dst 쪽이 최신이므로 가져오지 않는다."""
+    for sub in ("files", "submission_files"):
+        s = src_dir / sub
+        if not s.is_dir():
+            continue
+        for f in sorted(s.iterdir()):
+            if not f.is_file():
+                continue
+            dest = dst_dir / sub / f.name
+            if dest.exists():
+                if dest.stat().st_size == f.stat().st_size:
+                    continue
+                dest = _unique(dest)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            f.rename(dest)
+            actions.append(f"파일 보존: {src_dir.name}/{sub}/{f.name} → {dest.parent.name}/")
+
+
+def normalize_posts(posts_dir: Path) -> list:
+    """posts/ 아래 게시물 폴더를 현행 명명 규칙(post_dir_name과 동일:
+    <글ID>_<클린제목 40자>, ID 없으면 <순번>_<클린제목>)으로 통일하고,
+    같은 글의 중복 폴더(조회수 꼬리표 차이, 순번↔ID 세대 차이)를 병합한다.
+    근거는 각 폴더의 meta.json(원본 제목 label, 글 식별자가 든 top_url) —
+    meta.json 이 없거나 못 읽는 폴더는 건드리지 않는다. 반환: 작업 로그."""
+    actions = []
+    if not posts_dir.is_dir():
+        return actions
+
+    groups = {}   # 같은 글 묶음: ("pid", 글ID) 또는 ("name", 정규화된 폴더명)
+    for d in sorted(posts_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        try:
+            meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        title = sanitize_label(parse.clean_post_title(meta.get("label") or ""))[:40] or "post"
+        pid = sanitize_label(parse.post_id_from_url(meta.get("top_url") or ""))
+        if pid and pid != "untitled":
+            key, canonical = ("pid", pid), f"{pid}_{title}"
+        else:
+            m = re.match(r"(\d+)_", d.name)
+            canonical = f"{m.group(1) if m else '00'}_{title}"
+            key = ("name", canonical)
+        groups.setdefault(key, []).append((meta.get("saved_at") or "", d, canonical))
+
+    for members in groups.values():
+        members.sort(key=lambda t: t[0])              # saved_at 오름차순 — 끝이 최신
+        _, survivor, canonical = members[-1]
+        for _, loser, _ in members[:-1]:              # 옛 수집본 → 최신본에 병합 후 제거
+            _absorb_files(loser, survivor, actions)
+            shutil.rmtree(loser)
+            actions.append(f"중복 제거: {loser.name}  (→ {survivor.name})")
+        if survivor.name != canonical:
+            target = posts_dir / canonical
+            if target.exists():                       # meta 없는 폴더와 충돌 — 보존 우선
+                actions.append(f"개명 보류(이름 충돌): {survivor.name} → {canonical}")
+            else:
+                survivor.rename(target)
+                actions.append(f"개명: {survivor.name}  →  {canonical}")
+    return actions
+
+
+def cleanup_output(output_dir: Path):
+    """output/ 전체의 게시물 잔재 폴더 정리(수집 없이 정리만, ./ec cleanup).
+    '_'로 시작하는 폴더(_archive*, _logs)는 동결된 자료로 보고 건드리지 않는다."""
+    total = 0
+    for posts_dir in sorted(output_dir.glob("*/posts")) + sorted(output_dir.glob("*/*/posts")):
+        rel = posts_dir.relative_to(output_dir)
+        if rel.parts[0].startswith("_"):
+            continue
+        acts = normalize_posts(posts_dir)
+        for a in acts:
+            print(f"  · [{rel.parent}] {a}")
+        total += len(acts)
+    print(f"\n정리 완료: 작업 {total}건" if total else "정리할 잔재가 없습니다.")
+
+
 def drill_post(page, menu_dir: Path, idx: int, post: dict, net_sink,
                download: bool, dl_page, state, dl_index: dict) -> int:
     post_dir = menu_dir / "posts" / post_dir_name(idx, post)
+    # 글 제목이 사이트에서 바뀌면 폴더명도 따라가도록: 같은 글ID의 기존 폴더를 개명해 재사용
+    if not post_dir.exists():
+        pid = sanitize_label(parse.post_id_from_url(post["url"]))
+        if pid and pid != "untitled" and (menu_dir / "posts").is_dir():
+            for old in sorted(p for p in (menu_dir / "posts").iterdir()
+                              if p.is_dir() and p.name.startswith(f"{pid}_")):
+                old.rename(post_dir)
+                print(f"     · 제목 변경 감지 — 폴더 개명: {old.name} → {post_dir.name}")
+                break
     try:
         page.goto(post["url"], wait_until="domcontentloaded")
         page.wait_for_timeout(1000)
@@ -709,6 +815,9 @@ def drill_post(page, menu_dir: Path, idx: int, post: dict, net_sink,
 # ──────────────────────────────────────────────────────────────────────────
 def collect_menu(page, label, url, net_sink, output_dir, download, max_posts, dl_page, state) -> dict:
     menu_dir = output_dir / sanitize_label(label)
+    # 잔재 정리를 다운로드 인덱스 적재보다 먼저 — 인덱스가 병합 후 경로를 보게 한다
+    for msg in normalize_posts(menu_dir / "posts"):
+        print(f"     · {msg}")
     try:
         page.goto(url, wait_until="domcontentloaded")
         page.wait_for_timeout(1400)
@@ -908,6 +1017,8 @@ def main():
     ap.add_argument("--auto", action="store_true",
                     help="과목 진입 후 메뉴 자동 수집 + 글별 첨부까지")
     ap.add_argument("--analyze", action="store_true", help="output/ 분석(마감/놓친 항목)")
+    ap.add_argument("--cleanup", action="store_true",
+                    help="output/ 잔재 게시물 폴더 정리(중복 병합·개명) — 수집 없이 정리만")
     ap.add_argument("--save-login", action="store_true",
                     help="아이디/비밀번호를 macOS 키체인에 저장(자동 로그인용, ./ec login)")
     ap.add_argument("--no-download", action="store_true", help="첨부는 기록만, 파일은 안 받음")
@@ -927,6 +1038,10 @@ def main():
     if args.analyze:
         import analyze
         analyze.analyze(output_dir)
+        return
+
+    if args.cleanup:
+        cleanup_output(output_dir)
         return
 
     try:
