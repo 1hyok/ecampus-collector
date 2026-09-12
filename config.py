@@ -22,7 +22,7 @@ CAMPUS = "서울"            # "서울" | "글로컬" — 로그인 폼의 캠�
 
 # 로그인 후 메인에서 자동 진입할 과목명 키워드(과목 카드 title 부분일치).
 # None 이면 종전처럼 사람이 과목에 들어가고 Enter.
-AUTO_COURSE = "클라우드IOT서비스"
+AUTO_COURSE = "컴퓨터네트워크1"
 
 KNOWN_URLS = {
     # 비워둬도 됩니다 — --auto 가 과목 좌측 메뉴(/ilos/st/course/..._form.acl)를
