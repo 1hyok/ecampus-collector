@@ -100,6 +100,21 @@ def auto_label(page) -> str:
 # ──────────────────────────────────────────────────────────────────────────
 # frame 1개에서 텍스트/표/링크/HTML 추출
 # ──────────────────────────────────────────────────────────────────────────
+def _cell_text(cell) -> str:
+    """셀 텍스트. 비어 있으면 안쪽 img 의 alt/title 로 대체한다.
+
+    이캠퍼스 과제·출석 목록은 제출 여부를 <img alt="제출"> 로만 표시해서,
+    get_text() 만 쓰면 모든 항목이 빈 칸(=미제출처럼) 으로 보인다.
+    """
+    txt = cell.get_text(separator=" ", strip=True)
+    if txt:
+        return txt
+    for img in cell.find_all("img"):
+        alt = (img.get("alt") or img.get("title") or "").strip()
+        if alt:
+            return alt
+    return ""
+
 def extract_frame(frame):
     try:
         html = frame.content()
@@ -121,7 +136,7 @@ def extract_frame(frame):
         rows = []
         for tr in t.find_all("tr"):
             cells = tr.find_all(["th", "td"])
-            row = [c.get_text(separator=" ", strip=True) for c in cells]
+            row = [_cell_text(c) for c in cells]
             if any(row):
                 rows.append(row)
         if rows:
@@ -313,11 +328,25 @@ def save_login():
     print("  이제 ./ec 실행 시 자동 로그인합니다.")
 
 
+def force_korean(context) -> None:
+    """ilos UI 언어를 한국어로 고정한다.
+    메뉴·라벨(공지사항/과제/로그아웃…)을 한국어 텍스트로 찾는 코드가 많아
+    _language_ 쿠키가 en 으로 남아 있으면 로그인 판정부터 메뉴 수집까지 통째로 실패한다.
+    (2026-09-12 실측: 프로필에 _language_=en 이 남아 자동 로그인이 '실패'로 오판됐다)"""
+    try:
+        context.add_cookies([{"name": "_language_", "value": "ko",
+                              "domain": "ecampus.konkuk.ac.kr", "path": "/"}])
+    except Exception:
+        pass
+
+
 def is_logged_in(page) -> bool:
     try:
-        return "로그아웃" in (page.locator("body").inner_text(timeout=4000) or "")
+        body = page.locator("body").inner_text(timeout=4000) or ""
     except Exception:
         return False
+    # UI 언어가 영어로 넘어가 있어도 로그인 자체는 성공이다 — 둘 다 본다.
+    return ("로그아웃" in body) or ("Log Out" in body) or ("Logout" in body)
 
 
 def wait_logged_in(page, timeout_ms: int = 12000) -> bool:
@@ -1053,6 +1082,7 @@ def main():
     net_sink: list = []
     with sync_playwright() as p:
         context = open_context(p, Path(args.auth))
+        force_korean(context)
         attach_net_logging(context, net_sink)
         try:
             if args.auto:
