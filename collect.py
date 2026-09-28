@@ -222,7 +222,15 @@ def capture(page, out_dir: Path, net_sink: list, label: str = "") -> dict:
 # ──────────────────────────────────────────────────────────────────────────
 # 브라우저
 # ──────────────────────────────────────────────────────────────────────────
-def open_context(p, auth_dir: Path):
+def open_context(p, auth_dir: Path, headless: bool = False):
+    # headless: 무인 예약 실행용(윈도우 PC 에서 게임 중 창이 포커스를 뺏지 않게). 키체인 등록 필수.
+    if headless:
+        return p.chromium.launch_persistent_context(
+            user_data_dir=str(auth_dir),
+            headless=True,
+            viewport={"width": 1600, "height": 1000},
+            accept_downloads=True,
+        )
     return p.chromium.launch_persistent_context(
         user_data_dir=str(auth_dir),
         headless=False,
@@ -1065,7 +1073,12 @@ def main():
     ap.add_argument("--base", default=config.BASE_URL, help="시작 URL")
     ap.add_argument("--output", default=str(OUTPUT_DIR), help="저장 폴더(기본 output)")
     ap.add_argument("--auth", default=str(AUTH_DIR), help="세션 폴더(기본 .auth)")
+    ap.add_argument("--headless", action="store_true",
+                    help="브라우저 창 없이 수집(무인 실행용, 키체인 등록 필수)")
     args = ap.parse_args()
+
+    if args.headless and not (args.auto and keychain_creds()[0]):
+        sys.exit("--headless 는 --auto 와 키체인 등록이 있어야 한다(사람이 로그인할 창이 없다).")
 
     output_dir = Path(args.output)
 
@@ -1090,7 +1103,7 @@ def main():
 
     net_sink: list = []
     with sync_playwright() as p:
-        context = open_context(p, Path(args.auth))
+        context = open_context(p, Path(args.auth), headless=args.headless)
         force_korean(context)
         attach_net_logging(context, net_sink)
         try:
