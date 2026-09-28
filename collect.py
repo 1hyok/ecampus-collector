@@ -286,7 +286,16 @@ KEYCHAIN_SERVICE = "ecampus-collector"
 
 
 def keychain_creds():
-    """macOS 키체인에서 (아이디, 비밀번호). 미등록/비macOS면 (None, None)."""
+    """macOS 키체인(윈도우는 자격 증명 관리자)에서 (아이디, 비밀번호). 미등록이면 (None, None)."""
+    if sys.platform == "win32":
+        # 윈도우: keyring 이 자격 증명 관리자를 읽는다. 아이디는 "<서비스>:id" 항목의 비밀번호 칸에 둔다.
+        try:
+            import keyring
+        except ImportError:
+            return None, None
+        acct = keyring.get_password(KEYCHAIN_SERVICE + ":id", "id")
+        pw = keyring.get_password(KEYCHAIN_SERVICE, acct) if acct else None
+        return (acct, pw) if acct and pw else (None, None)
     try:
         r = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE],
                            capture_output=True, text=True)
