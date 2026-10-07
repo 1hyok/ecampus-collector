@@ -1,0 +1,48 @@
+name: Enable auto-merge
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable repository-default auto-merge
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pullRequestId = context.payload.pull_request.node_id;
+            const state = await github.graphql(
+              `query($id: ID!) {
+                node(id: $id) {
+                  ... on PullRequest {
+                    autoMergeRequest { enabledAt }
+                  }
+                }
+              }`,
+              { id: pullRequestId }
+            );
+
+            if (state.node.autoMergeRequest) {
+              core.info("자동 병합이 이미 활성화되어 있습니다.");
+              return;
+            }
+
+            await github.graphql(
+              `mutation($id: ID!, $method: PullRequestMergeMethod!) {
+                enablePullRequestAutoMerge(input: {
+                  pullRequestId: $id,
+                  mergeMethod: $method
+                }) {
+                  pullRequest { number autoMergeRequest { enabledAt } }
+                }
+              }`,
+              { id: pullRequestId, method: "MERGE" }
+            );
+            core.info("필수 체크 통과 후 merge commit 방식으로 자동 병합합니다.");

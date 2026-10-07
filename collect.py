@@ -3,8 +3,8 @@
 Konkuk e-campus(ilos) 수집기.
 
 설계 원칙
-  - 로그인은 사람이, 수집은 코드가: headful 브라우저를 띄우고 사용자가 직접 로그인.
-    비밀번호는 코드가 절대 다루지 않는다.
+  - 대화형 실행은 창을 띄워 사용자가 로그인하고, 키체인 자동 로그인으로 시작한 --auto는
+    기본적으로 헤드리스 실행한다. 비밀번호는 코드에 저장하지 않는다.
   - 로그인 세션은 Playwright persistent context(.auth/)에 저장 → 다음 실행부터 로그인 생략.
   - 한 페이지를 캡처하면 그 폴더 아래에:
         content.txt  화면 텍스트(모든 frame)
@@ -32,6 +32,8 @@ Konkuk e-campus(ilos) 수집기.
   --no-download     첨부 '기록'만 하고 실제 파일은 받지 않음
   --menus 공지,과제  특정 메뉴만(라벨 부분일치, 콤마 구분)
   --max-posts N     메뉴당 게시물 상한(기본 40)
+  --headless        --auto와 키체인 자격 증명으로 창 없이 수집
+  --headed          자동 수집도 브라우저 창을 띄워 실행
 """
 
 import argparse
@@ -223,7 +225,6 @@ def capture(page, out_dir: Path, net_sink: list, label: str = "") -> dict:
 # 브라우저
 # ──────────────────────────────────────────────────────────────────────────
 def open_context(p, auth_dir: Path, headless: bool = False):
-    # headless: 무인 예약 실행용(윈도우 PC 에서 게임 중 창이 포커스를 뺏지 않게). 키체인 등록 필수.
     if headless:
         return p.chromium.launch_persistent_context(
             user_data_dir=str(auth_dir),
@@ -1074,11 +1075,17 @@ def main():
     ap.add_argument("--output", default=str(OUTPUT_DIR), help="저장 폴더(기본 output)")
     ap.add_argument("--auth", default=str(AUTH_DIR), help="세션 폴더(기본 .auth)")
     ap.add_argument("--headless", action="store_true",
-                    help="브라우저 창 없이 수집(무인 실행용, 키체인 등록 필수)")
+                    help="브라우저 창 없이 수집(무인 실행용, --auto와 키체인 등록 필수)")
+    ap.add_argument("--headed", action="store_true",
+                    help="브라우저 창을 띄워 수집(자동 수집도 화면 확인 가능)")
     args = ap.parse_args()
 
     if args.headless and not (args.auto and keychain_creds()[0]):
         sys.exit("--headless 는 --auto 와 키체인 등록이 있어야 한다(사람이 로그인할 창이 없다).")
+    if args.headless and args.headed:
+        sys.exit("--headless 와 --headed 는 함께 사용할 수 없습니다.")
+
+    headless = args.headless or (args.auto and bool(keychain_creds()[0]) and not args.headed)
 
     output_dir = Path(args.output)
 
@@ -1103,7 +1110,7 @@ def main():
 
     net_sink: list = []
     with sync_playwright() as p:
-        context = open_context(p, Path(args.auth), headless=args.headless)
+        context = open_context(p, Path(args.auth), headless=headless)
         force_korean(context)
         attach_net_logging(context, net_sink)
         try:
