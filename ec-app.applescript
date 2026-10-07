@@ -12,7 +12,7 @@
 --   · 이미 수집이 돌고 있으면 중복 실행하지 않음
 
 on run
-	set projectDir to "/Users/zach/개발/프로젝트/ecampus-collector"
+	set projectDir to "/Users/zach/Development/ecampus-collector"
 	-- 출력 3줄(종료코드 / 로그경로 / 완료요약)을 한 번의 do shell script 로 받는다.
 	-- pgrep 패턴의 [.] 는 이 셸 자신의 커맨드라인 문자열에 매칭되지 않게 하는 장치.
 	set shellCmd to "cd " & quoted form of projectDir & " && " & ¬
