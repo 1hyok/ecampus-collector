@@ -51,15 +51,15 @@ jobs:
               if (state.node.isDraft || state.node.autoMergeRequest) continue;
 
               await github.graphql(
-                `mutation($id: ID!, $method: PullRequestMergeMethod!) {
+                `mutation($id: ID!, $mergeMethod: PullRequestMergeMethod!) {
                   enablePullRequestAutoMerge(input: {
                     pullRequestId: $id,
-                    mergeMethod: $method
+                    mergeMethod: $mergeMethod
                   }) {
                     pullRequest { number autoMergeRequest { enabledAt } }
                   }
                 }`,
-                { id: pullRequestId, method: "MERGE" }
+                { id: pullRequestId, mergeMethod: "MERGE" }
               );
               core.info(`PR #${pullRequest.number}: 필수 체크 통과 후 자동 병합을 예약했습니다.`);
             }
