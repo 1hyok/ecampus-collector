@@ -1,8 +1,9 @@
 name: Enable auto-merge
 
 on:
-  pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
 
 permissions:
   contents: write
@@ -10,39 +11,55 @@ permissions:
 
 jobs:
   enable:
-    if: github.event.pull_request.draft == false
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Enable repository-default auto-merge
         uses: actions/github-script@v7
         with:
           script: |
-            const pullRequestId = context.payload.pull_request.node_id;
-            const state = await github.graphql(
-              `query($id: ID!) {
-                node(id: $id) {
-                  ... on PullRequest {
-                    autoMergeRequest { enabledAt }
-                  }
-                }
-              }`,
-              { id: pullRequestId }
-            );
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pullRequests = context.payload.workflow_run.pull_requests ?? [];
 
-            if (state.node.autoMergeRequest) {
-              core.info("자동 병합이 이미 활성화되어 있습니다.");
+            if (pullRequests.length === 0) {
+              core.info("이 CI 실행에 연결된 PR이 없습니다.");
               return;
             }
 
-            await github.graphql(
-              `mutation($id: ID!, $method: PullRequestMergeMethod!) {
-                enablePullRequestAutoMerge(input: {
-                  pullRequestId: $id,
-                  mergeMethod: $method
-                }) {
-                  pullRequest { number autoMergeRequest { enabledAt } }
-                }
-              }`,
-              { id: pullRequestId, method: "MERGE" }
-            );
-            core.info("필수 체크 통과 후 merge commit 방식으로 자동 병합합니다.");
+            for (const pullRequest of pullRequests) {
+              if (pullRequest.base?.ref !== "main") continue;
+
+              const { data } = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: pullRequest.number,
+              });
+              const pullRequestId = data.node_id;
+              const state = await github.graphql(
+                `query($id: ID!) {
+                  node(id: $id) {
+                    ... on PullRequest {
+                      isDraft
+                      autoMergeRequest { enabledAt }
+                    }
+                  }
+                }`,
+                { id: pullRequestId }
+              );
+
+              if (state.node.isDraft || state.node.autoMergeRequest) continue;
+
+              await github.graphql(
+                `mutation($id: ID!, $method: PullRequestMergeMethod!) {
+                  enablePullRequestAutoMerge(input: {
+                    pullRequestId: $id,
+                    mergeMethod: $method
+                  }) {
+                    pullRequest { number autoMergeRequest { enabledAt } }
+                  }
+                }`,
+                { id: pullRequestId, method: "MERGE" }
+              );
+              core.info(`PR #${pullRequest.number}: 필수 체크 통과 후 자동 병합을 예약했습니다.`);
+            }
