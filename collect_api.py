@@ -242,16 +242,18 @@ def menu_frames(client, form_path: str, referer: str):
                                    referer=form_url)
                 frames.append((f"{api.ORIGIN}{ONLINE_AJAX}?WEEK_NO={w}", frag))
         return frames, form
-    url, data = api.parse_list_ajax(form)
+    url, data, paged = api.parse_list_ajax(form, form_path)
     if url:
         seen_ids, page = set(), 1
         while page <= 50:
-            frag = client.post(url, {**data, "start": page}, referer=form_url)
+            frag = client.post(url, {**data, "start": page} if paged else data, referer=form_url)
             ids = {parse.post_id_from_url(p["url"]) for p in parse.extract_post_links(frag, api.ORIGIN + base)}
-            if not ids or ids <= seen_ids:
+            if paged and ids and ids <= seen_ids:
+                break                           # 같은 페이지가 또 왔다 — 더 없음
+            frames.append((f"{api.ORIGIN}{url}" + (f"?start={page}" if paged else ""), frag))
+            if not paged or not ids:
                 break
             seen_ids |= ids
-            frames.append((f"{api.ORIGIN}{url}?start={page}", frag))
             page += 1
     return frames, form
 

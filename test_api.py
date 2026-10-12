@@ -72,7 +72,8 @@ class TestSessionDead(unittest.TestCase):
 
 class TestAjaxReplay(unittest.TestCase):
     def test_parse_list_ajax(self):
-        url, data = api.parse_list_ajax(LIST_FORM)
+        url, data, paged = api.parse_list_ajax(LIST_FORM, "/ilos/st/course/lecture_material_list_form.acl")
+        self.assertTrue(paged)
         self.assertEqual(url, "/ilos/st/course/lecture_material_list.acl")
         self.assertEqual(data["ud"], "202111373")
         self.assertEqual(data["ky"], "A20263BBAB120013154003")
@@ -82,7 +83,16 @@ class TestAjaxReplay(unittest.TestCase):
         self.assertNotIn("encoding", data)
 
     def test_parse_list_ajax_absent(self):
-        self.assertEqual(api.parse_list_ajax("<html>서버 렌더링</html>"), (None, None))
+        self.assertEqual(api.parse_list_ajax("<html>서버 렌더링</html>", "/ilos/st/course/x_list_form.acl"),
+                         (None, None, False))
+
+    def test_parse_list_ajax_other_function_name_and_unpaged(self):
+        form = """<script>function attendList(){ $.ajax({ url: "/ilos/st/course/attendance_list.acl",
+          type: "POST", data: { ud : "202111373", ky : "K", encoding : "utf-8" }, async: true }); }
+          $.ajax({ url: "/ilos/st/course/insert_important.acl", data: { x : "1" } });</script>"""
+        url, data, paged = api.parse_list_ajax(form, "/ilos/st/course/attendance_list_form.acl?x=1")
+        self.assertEqual((url, data, paged), ("/ilos/st/course/attendance_list.acl",
+                                              {"ud": "202111373", "ky": "K"}, False))
 
     def test_parse_efile_calls_collects_all_and_dedups(self):
         calls = api.parse_efile_calls(POST_PAGE)

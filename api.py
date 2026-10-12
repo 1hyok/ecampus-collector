@@ -143,12 +143,12 @@ class Client:
         AJAX 가 없는 메뉴는 폼 HTML 자체에서 글 링크를 뽑는다. 페이지는 새 글이 안 나올 때까지 넘긴다."""
         base = ORIGIN + form_path.rsplit("/", 1)[0] + "/"
         form = self.get(form_path, referer)
-        url, data = parse_list_ajax(form)
+        url, data, paged = parse_list_ajax(form, form_path)
         if not url:
             return parse.extract_post_links(form, base)[:max_posts]
         out, seen, page = [], set(), 1
         while len(out) < max_posts and page <= 50:
-            frag = self.post(url, {**data, "start": page}, referer=ORIGIN + form_path)
+            frag = self.post(url, {**data, "start": page} if paged else data, referer=ORIGIN + form_path)
             # 링크 URL 에 start= 가 박혀 있어 URL 로는 중복을 못 거른다 — 글 식별자로 거른다
             fresh = [p for p in parse.extract_post_links(frag, base)
                      if parse.post_id_from_url(p["url"]) not in seen]
@@ -156,6 +156,8 @@ class Client:
                 break
             seen.update(parse.post_id_from_url(p["url"]) for p in fresh)
             out.extend(fresh)
+            if not paged:
+                break
             page += 1
         return out[:max_posts]
 
@@ -191,18 +193,25 @@ def _static_args(block: str) -> dict:
     return {k: v for k, v in re.findall(r"""(\w+)\s*:\s*["']([^"']*)["']""", block)}
 
 
-def parse_list_ajax(form_html: str):
-    """목록 폼(*_list_form.acl)의 listPage() 가 부르는 AJAX → (url, data).
-    data 의 start 는 호출 때 채우고, 값이 JS 식인 SCH_VALUE 는 빈 문자열로 둔다.
-    그런 함수가 없으면 (None, None) — 서버가 목록을 HTML 에 직접 그려 준 메뉴(온라인강의 등)."""
-    m = re.search(r"function\s+listPage\s*\([^)]*\)\s*\{.*?url\s*:\s*[\"']([^\"']+)[\"'].*?"
-                  r"data\s*:\s*\{(.*?)\}\s*,", form_html, re.S)
-    if not m:
-        return None, None
-    data = _static_args(m.group(2))
-    data.setdefault("SCH_VALUE", "")
-    data.pop("encoding", None)
-    return m.group(1), data
+def parse_list_ajax(form_html: str, form_path: str):
+    """메뉴 폼(*_form.acl)이 브라우저에서 AJAX 로 채우는 목록 호출 → (url, data, paged).
+    ilos 는 폼 `X_list_form.acl` 에 목록 `X_list.acl` 을 대응시키고, 호출부(listPage·attendList …)의
+    함수 이름은 메뉴마다 다르다. 그래서 함수 이름 대신 그 URL 을 부르는 $.ajax 블록을 찾는다.
+    data 는 따옴표 값만 가져오고 JS 식(`$("#SCH_VALUE").val()`)은 빈 문자열로 둔다.
+    paged 는 호출부가 start 인자를 쓰는지. 해당 AJAX 가 없으면 (None, None, False)
+    — 서버가 목록을 HTML 에 직접 그려 준 메뉴."""
+    list_url = re.sub(r"_form\.acl.*$", ".acl", form_path.split("?")[0])
+    for m in re.finditer(r"""url\s*:\s*["']([^"']+)["'](.{0,300}?)data\s*:\s*\{(.*?)\}""", form_html or "", re.S):
+        if m.group(1) != list_url:
+            continue
+        block = m.group(3)
+        data = _static_args(block)
+        for k, v in re.findall(r"(\w+)\s*:\s*([^,\n}]+)", block):
+            if k not in data and k not in ("start", "encoding"):
+                data[k] = ""                     # JS 식 값
+        data.pop("encoding", None)
+        return list_url, data, bool(re.search(r"\bstart\s*:", block))
+    return None, None, False
 
 
 def parse_efile_calls(post_html: str) -> list:
