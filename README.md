@@ -8,9 +8,11 @@ Konkuk e-campus(ilos LMS)에서 내 수강 과목의 **공지·강의자료·과
 - **비밀번호는 파일/레포에 절대 안 남긴다.** 자동 로그인을 켜도 자격증명은 macOS
   **키체인**에만 저장된다(`./ec login` 으로 1회 등록). 키체인이 없으면 종전처럼
   브라우저 창을 띄워 사람이 직접 로그인하는 흐름으로 폴백.
-- 키체인 로그인을 사용하는 `--auto`는 기본적으로 **헤드리스 Chromium**에서 실행해 데스크톱
-  포커스를 빼앗지 않는다. 수동 수집과 키체인 로그인 없는 자동 수집은 로그인할 수 있도록 창을 연다.
-  화면을 확인하며 자동 수집하려면 `--headed`를 지정한다.
+- 키체인 로그인이 있는 `--auto`는 기본적으로 **브라우저 없이 HTTP(API)** 로 수집한다
+  ([api.py](api.py) 로그인·과목 입장·조회·첨부, [collect_api.py](collect_api.py) 수집 흐름).
+  창이 뜨지 않고 과목 전체가 20초 안팎이다. 브라우저로 하려면 `--browser`(헤드리스) 또는
+  `--headed`(창), 추가 인증이 뜨는 계정이면 `--browser` 로 사람이 처리한다.
+  수동 수집과 키체인 로그인 없는 자동 수집은 종전처럼 창을 연다.
 - ilos 세션 쿠키는 **브라우저를 닫으면 사라진다**(중복 로그인 시 기존 세션도 끊김)
   → 매 실행 로그인이 필요해서 자동 로그인이 있는 것.
 - ilos는 frame/iframe/frameset을 자주 쓰므로 **모든 frame**을 긁는다.
@@ -60,7 +62,9 @@ playwright install chromium
 
 ### 1) 자동 수집 (권장 · "알아서 다 해줘")
 ```bash
-python collect.py --auto      # = ./ec
+python collect.py --auto      # = ./ec  (키체인 등록 시 HTTP, 과목 전부)
+python collect.py --auto --course 알고리즘,데이터베이스   # 과목 키워드(부분일치)로 한정
+python collect.py --auto --browser  # 키체인이 있어도 Playwright 브라우저로
 python collect.py --auto --headed  # 창을 띄워 진행 상태를 확인
 python collect.py --auto --headless  # 키체인 로그인으로 창 없이 실행
 ```
@@ -75,6 +79,19 @@ python collect.py --auto --headless  # 키체인 로그인으로 창 없이 실�
 5. 메뉴 URL은 `output/_discovered_urls.json`, 메뉴별 글/첨부 수 요약은 `output/_index.json`.
 
 > 메뉴 텍스트가 아니라 **실제 href(/ilos/st/course/…)** 로 찾으므로 동명의 커뮤니티 메뉴와 안 헷갈립니다.
+
+**HTTP(API) 수집이 브라우저와 다른 점** — 저장 형식은 같고(`meta.json` 에 `"via": "api"`),
+브라우저가 AJAX 로 채우던 조각을 같은 엔드포인트로 직접 받는다.
+- 과목 입장: 메인의 과목 카드 → `eclass_room2.acl`(KJKEY). `--auto` 는 정규 과목 전부를 돈다
+  (`[대괄호]` 시작 비교과 제외, `--course` 로 한정).
+- 게시물 목록: `*_list_form.acl` 의 `listPage()` 가 부르는 `*_list.acl` 를 재현.
+- 첨부 목록: 상세의 `efile_list.acl` 호출을 **전부** 재현(과제 상세는 3번 부른다), 파일은 `efile_download` GET.
+- 온라인강의: 화면에 떠 있던 한 주차가 아니라 **모든 주차**(`online_list.acl` WEEK_NO)의 출석인정기간·진도를 받는다.
+- 세션 만료 판정은 응답이 작은 alert 페이지일 때만(과제 상세 같은 정상 페이지는 같은 문구를 스크립트에 품고 있다).
+
+### 알림·할일 (`notify.py`)
+`python notify.py [--json] [--course 키워드]` — 새 과제·공지·강의자료·온라인강의 알림과 미제출 할일을
+HTTP 로 받는다(브라우저 불필요, 키체인 필요).
 
 ### CI
 GitHub Actions는 PR, `main` 브랜치 푸시, 수동 실행 때 문법 검사와 네트워크에 의존하지 않는 단위 테스트를 실행한다. PR 설명에는 `Closes #123`, `Fixes #123`, `Resolves #123` 중 하나로 이 저장소의 실제 이슈를 연결해야 한다. 열린 PR은 자동 병합이 설정되며, 보호 규칙의 필수 체크가 통과한 뒤 저장소 기본 방식인 merge commit으로 병합된다. `main` 직접 푸시는 차단된다.

@@ -1078,6 +1078,10 @@ def main():
                     help="브라우저 창 없이 수집(무인 실행용, --auto와 키체인 등록 필수)")
     ap.add_argument("--headed", action="store_true",
                     help="브라우저 창을 띄워 수집(자동 수집도 화면 확인 가능)")
+    ap.add_argument("--browser", action="store_true",
+                    help="키체인이 있어도 HTTP(API) 대신 Playwright 브라우저로 수집(추가 인증이 뜨는 경우 등)")
+    ap.add_argument("--course", default=None,
+                    help="API 수집 대상 과목(콤마 구분 부분일치, 기본: 정규 과목 전부)")
     args = ap.parse_args()
 
     if args.headless and not (args.auto and keychain_creds()[0]):
@@ -1085,9 +1089,18 @@ def main():
     if args.headless and args.headed:
         sys.exit("--headless 와 --headed 는 함께 사용할 수 없습니다.")
 
-    headless = args.headless or (args.auto and bool(keychain_creds()[0]) and not args.headed)
+    has_keychain = bool(keychain_creds()[0])
+    headless = args.headless or (args.auto and has_keychain and not args.headed)
 
     output_dir = Path(args.output)
+
+    # 키체인 로그인이 있는 --auto 는 브라우저 없이 HTTP 로 수집한다(--browser/--headed/--headless 로 끌 수 있음).
+    if args.auto and has_keychain and not (args.browser or args.headed or args.headless):
+        import collect_api
+        collect_api.run_api(output_dir, download=not args.no_download, only=args.menus,
+                            max_posts=args.max_posts, courses=args.course)
+        print("\n수집 종료. 분석: python collect.py --analyze")
+        return
 
     if args.save_login:
         save_login()
