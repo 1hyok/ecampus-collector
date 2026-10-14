@@ -100,7 +100,7 @@ python collect.py --auto --headless  # 키체인 로그인으로 창 없이 실�
 HTTP 로 받는다(브라우저 불필요, 키체인 필요).
 
 ### CI
-GitHub Actions는 PR, `main` 브랜치 푸시, 수동 실행 때 문법 검사와 네트워크에 의존하지 않는 단위 테스트를 실행한다. PR 설명에는 `Closes #123`, `Fixes #123`, `Resolves #123` 중 하나로 이 저장소의 실제 이슈를 연결해야 한다. 열린 PR은 자동 병합이 설정되며, 보호 규칙의 필수 체크가 통과한 뒤 저장소 기본 방식인 merge commit으로 병합된다. `main` 직접 푸시는 차단된다.
+GitHub Actions는 PR, `main` 브랜치 푸시, 수동 실행 때 문법 검사와 네트워크에 의존하지 않는 단위 테스트를 실행한다. PR 본문은 `.github/pull_request_template.md`의 `변경`·`검증` 항목을 채우고, `Closes #123`, `Fixes #123`, `Resolves #123` 중 하나로 이 저장소의 이슈를 연결해야 한다. 연결된 이슈도 `.github/ISSUE_TEMPLATE/development_request.md`의 `배경`·`범위`·`완료 조건`·`비범위` 항목을 채워야 한다. `Require linked issue` 필수 체크가 이슈 생성·수정 시 이슈 양식을, PR 검사 시 양쪽 본문을 확인한다. 열린 PR은 자동 병합이 설정되며, 보호 규칙의 필수 체크가 통과한 뒤 저장소 기본 방식인 merge commit으로 병합된다. `main` 직접 푸시는 차단된다.
 
 eCampus 로그인 정보와 개인 브라우저 프로필을 쓰는 실제 자료 수집은 CI에서 실행하지 않는다. 개인 계정과 로컬 파일에 묶인 수집기라 자동 배포 단계는 두지 않는다.
 
