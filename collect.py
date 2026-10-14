@@ -246,7 +246,7 @@ def active_page(context):
     return pages[-1] if pages else context.new_page()
 
 
-def detect_course(page) -> str:
+def detect_course(page, with_section: bool = False) -> str:
     """현재 화면(모든 frame)에서 과목명을 읽는다. 없으면 ''.
     과목별로 output/<과목명>/ 에 저장해 여러 과목이 안 섞이게 하는 용도."""
     htmls = []
@@ -260,7 +260,7 @@ def detect_course(page) -> str:
         except Exception:
             pass
     for h in htmls:
-        c = parse.extract_course_name(h)
+        c = parse.extract_course_name(h, with_section=with_section)
         if c:
             return c
     return ""
@@ -915,7 +915,7 @@ def run_manual(context, net_sink, base_url, output_dir,
             break
         if s.lower() == "auto":
             run_auto(context, net_sink, base_url, output_dir,
-                     download=download, only=only, max_posts=max_posts)
+                     download=download, only=only, max_posts=max_posts, use_api=True)
             continue
 
         pg = active_page(context)
@@ -937,7 +937,7 @@ def run_manual(context, net_sink, base_url, output_dir,
 # 모드: 메뉴 자동 수집 (+ 글별 첨부)
 # ──────────────────────────────────────────────────────────────────────────
 def run_auto(context, net_sink, base_url, output_dir,
-             download=True, only=None, max_posts=40):
+             download=True, only=None, max_posts=40, use_api=False):
     page = active_page(context)
     goto_base_if_blank(page, base_url)
 
@@ -974,6 +974,21 @@ def run_auto(context, net_sink, base_url, output_dir,
 
     page = active_page(context)
     net_sink.clear()
+
+    if use_api:
+        course = detect_course(page, with_section=True)
+        if not course:
+            print("HTTP 수집을 시작하지 않았습니다. 로그인 후 과목 홈(좌측 메뉴가 보이는 화면)으로 이동하세요.")
+            return
+        try:
+            import api
+            import collect_api
+            client = api.Client.from_browser_cookies(context.cookies(api.ORIGIN))
+            collect_api.run_api(output_dir, download=download, only=only,
+                                max_posts=max_posts, courses=course, client=client)
+        except api.LoginError as e:
+            print(f"HTTP 수집을 시작하지 않았습니다: {e}")
+        return
 
     course = detect_course(page)                       # 과목별 폴더로 분리(섞임 방지)
     if course:
@@ -1078,6 +1093,10 @@ def main():
                     help="브라우저 창 없이 수집(무인 실행용, --auto와 키체인 등록 필수)")
     ap.add_argument("--headed", action="store_true",
                     help="브라우저 창을 띄워 수집(자동 수집도 화면 확인 가능)")
+    ap.add_argument("--browser", action="store_true",
+                    help="키체인이 있어도 HTTP(API) 대신 Playwright 브라우저로 수집(추가 인증이 뜨는 경우 등)")
+    ap.add_argument("--course", default=None,
+                    help="API 수집 대상 과목(콤마 구분 부분일치, 기본: 정규 과목 전부)")
     args = ap.parse_args()
 
     if args.headless and not (args.auto and keychain_creds()[0]):
@@ -1085,9 +1104,20 @@ def main():
     if args.headless and args.headed:
         sys.exit("--headless 와 --headed 는 함께 사용할 수 없습니다.")
 
-    headless = args.headless or (args.auto and bool(keychain_creds()[0]) and not args.headed)
+    has_keychain = bool(keychain_creds()[0])
+    headless = args.headless or (args.auto and has_keychain and not args.headed)
 
     output_dir = Path(args.output)
+
+    # 기본 --auto 는 HTTP 수집. 키체인이 있으면 HTTP 로 로그인하고, 없으면
+    # 브라우저에서 직접 로그인한 세션 쿠키를 HTTP 클라이언트에 넘긴다.
+    use_http_auto = args.auto and not (args.browser or args.headed or args.headless)
+    if use_http_auto and has_keychain:
+        import collect_api
+        collect_api.run_api(output_dir, download=not args.no_download, only=args.menus,
+                            max_posts=args.max_posts, courses=args.course)
+        print("\n수집 종료. 분석: python collect.py --analyze")
+        return
 
     if args.save_login:
         save_login()
@@ -1117,7 +1147,7 @@ def main():
             if args.auto:
                 run_auto(context, net_sink, args.base, output_dir,
                          download=not args.no_download, only=args.menus,
-                         max_posts=args.max_posts)
+                         max_posts=args.max_posts, use_api=use_http_auto and not has_keychain)
             else:
                 run_manual(context, net_sink, args.base, output_dir,
                            download=not args.no_download, only=args.menus,

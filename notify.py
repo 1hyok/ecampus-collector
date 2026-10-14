@@ -6,8 +6,7 @@ ilos 는 좌측 상단 배지로 알림(notification)과 할일(todo)을 준다:
   - /ilos/mp/todo_list.acl          미제출/미학습 할일 목록(POST, HTML 조각)
 폴더를 diff 하는 것보다 정확하고(교수가 올린 시각이 찍힌다) 훨씬 싸다.
 
-collect.py 와 달리 headless 로 돈다 — 자동으로 주기 실행되는 용도라
-창이 떴다 사라지면 쓰는 사람이 방해받는다.
+브라우저 없이 HTTP(api.Client)로 돈다 — 자동으로 주기 실행되는 용도라 창이 필요 없다.
 
 주의: ilos 는 중복 로그인 시 기존 세션을 끊는다. 사람이 eCampus 를 보고 있는
 동안 이걸 돌리면 그 사람이 로그아웃된다. 자주 돌리지 말 것.
@@ -17,15 +16,13 @@ collect.py 와 달리 headless 로 돈다 — 자동으로 주기 실행되는 �
     python notify.py --course 컴퓨터공학세미나
 """
 import argparse, json, re, sys
-from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
 
-import collect, config
+import api
 
-NOTI_URL = "http://ecampus.konkuk.ac.kr/ilos/mp/notification_list.acl"
-TODO_URL = "http://ecampus.konkuk.ac.kr/ilos/mp/todo_list.acl"
-TODO_FORM_URL = "http://ecampus.konkuk.ac.kr/ilos/mp/todo_list_form.acl"
+NOTI_URL = "/ilos/mp/notification_list.acl"
+TODO_URL = "/ilos/mp/todo_list.acl"
 
 
 def _text(el) -> str:
@@ -94,46 +91,26 @@ def parse_todos(html: str) -> list:
     return out
 
 
+def html_to_lines(html: str) -> str:
+    """알림 목록 HTML → parse_notifications 가 먹는 줄 단위 텍스트.
+    날짜 헤더(notification_title) · 과목(notification_subject) · 내용(notification_text) ·
+    상대시각(notification_day) 이 문서 순서대로 한 줄씩이 되게 잇는다(브라우저 innerText 와 같은 모양)."""
+    soup = BeautifulSoup(html or "", "lxml")
+    sel = ".notification_title, .notification_subject, .notification_text, .notification_day"
+    lines = (_text(el.get_text(" ")) for el in soup.select(sel))
+    return "\n".join(l for l in lines if l)
+
+
 def fetch(course_filter: str = "") -> dict:
-    with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
-            user_data_dir=str(Path(".auth-notify")), headless=True,
-            accept_downloads=False)
-        collect.force_korean(ctx)
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        page.on("dialog", lambda d: d.dismiss())
-        uid, pw = collect.keychain_creds()
-        if not uid:
-            ctx.close()
-            sys.exit("키체인 미등록 — ./ec login 으로 등록하세요.")
-        page.goto(config.LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(800)
-        if not collect.is_logged_in(page):
-            page.fill("#usr_id", uid)
-            page.fill("#usr_pwd", pw)
-            try:
-                page.check("#s_campus")
-            except Exception:
-                pass
-            page.evaluate("() => loginForm()")
-            if not collect.wait_logged_in(page, 15000):
-                ctx.close()
-                sys.exit("로그인 실패 — ./ec login 으로 재등록하세요.")
-
-        page.goto(NOTI_URL, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(2000)
-        notis = parse_notifications(page.locator("body").inner_text(timeout=8000))
-
-        # 할일 목록은 todo_list_form.acl 을 띄워도 #todo_list 가 비어 오는 경우가 있어
-        # (주입 시점이 어긋난다) ajax 엔드포인트를 직접 때린다.
-        todo_html = page.evaluate("""async (url) => {
-            const res = await fetch(url, {method:'POST',
-                headers:{'Content-Type':'application/x-www-form-urlencoded'},
-                body:'todoKjList=&chk_cate=ALL&encoding=utf-8'});
-            return await res.text();
-        }""", TODO_URL)
-        ctx.close()
-
+    """브라우저 없이 HTTP 로 알림·할일을 받는다(api.Client, 키체인 자격)."""
+    try:
+        client = api.Client.from_keychain()
+        client.login()
+    except api.LoginError as e:
+        sys.exit(f"로그인 실패: {e}")
+    notis = parse_notifications(html_to_lines(client.get(NOTI_URL)))
+    # 할일 목록은 todo_list_form.acl 화면이 아니라 ajax 엔드포인트를 직접 부른다.
+    todo_html = client.post(TODO_URL, {"todoKjList": "", "chk_cate": "ALL"})
     todos = parse_todos(todo_html)
 
     if course_filter:
