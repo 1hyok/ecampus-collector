@@ -83,6 +83,41 @@ class Client:
             raise LoginError("키체인 미등록 — ./ec login 으로 등록하세요.")
         return cls(uid, pw, campus)
 
+    @classmethod
+    def from_browser_cookies(cls, cookies: list, campus: str = None):
+        """Playwright 로그인 세션을 HTTP 클라이언트에 복사한다.
+
+        쿠키는 eCampus 호스트와 그 부모 도메인만 허용한다. 아이디·비밀번호를
+        다시 보내지 않으므로 수동 로그인 및 추가 인증을 마친 세션을 재사용할 수 있다.
+        """
+        client = cls("", "", campus)
+        host = urllib.parse.urlsplit(ORIGIN).hostname
+        accepted = 0
+        for item in cookies or []:
+            name, value = item.get("name"), item.get("value")
+            raw_domain = item.get("domain") or ""
+            domain = raw_domain.lstrip(".").lower()
+            if not name or value is None or not domain:
+                continue
+            if host != domain and not host.endswith("." + domain):
+                continue
+            expires = item.get("expires")
+            session_cookie = expires is None or float(expires) < 0
+            cookie = http.cookiejar.Cookie(
+                version=0, name=name, value=value, port=None, port_specified=False,
+                domain=domain, domain_specified=raw_domain.startswith("."),
+                domain_initial_dot=raw_domain.startswith("."),
+                path=item.get("path") or "/", path_specified=True,
+                secure=bool(item.get("secure")), expires=None if session_cookie else int(expires),
+                discard=session_cookie, comment=None, comment_url=None,
+                rest={"HttpOnly": item.get("httpOnly", False)}, rfc2109=False)
+            client.jar.set_cookie(cookie)
+            accepted += 1
+        if not accepted:
+            raise LoginError("브라우저에서 eCampus 세션 쿠키를 찾지 못했습니다.")
+        client.logged_in = True
+        return client
+
     # ── 요청 ────────────────────────────────────────────────────────────
     def _url(self, path: str) -> str:
         return path if path.startswith("http") else ORIGIN + path
@@ -126,7 +161,10 @@ class Client:
         self.logged_in = True
 
     def courses(self) -> list:
-        return parse_courses(self.get("/ilos/main/main_form.acl"))
+        courses = parse_courses(self.get("/ilos/main/main_form.acl"))
+        if not courses:
+            raise LoginError("HTTP 세션에서 과목 목록을 읽지 못했습니다. 로그인 상태를 확인하세요.")
+        return courses
 
     def enter(self, kj: str) -> str:
         """과목방 입장(세션에 현재 과목이 박힌다). 반환: 입장 후 이동할 URL."""

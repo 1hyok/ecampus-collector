@@ -92,9 +92,9 @@ def fetch_attachment(client: api.Client, att: dict, post_url: str, files_dir: Pa
     except api.SessionDead:
         return False, None, "session"
     except Exception:
-        return False, None, None
+        return False, None, "request"
     if fname is None:                      # 파일이 아니라 오류 HTML 이 왔다
-        return False, None, None
+        return False, None, "response"
     name = collect.clean_filename(att.get("filename") or "") or collect.sanitize_label(fname) or "file"
     files_dir.mkdir(parents=True, exist_ok=True)
     dest = collect._unique(files_dir / name)
@@ -116,11 +116,21 @@ def save_attachments(client, atts, post_url, files_dir, download, state, dl_inde
             except Exception:
                 pass
             skipped += 1
+        elif download and not att.get("url") and att.get("token"):
+            rec["download_error"] = "browser_token_download_unresolved"
+        elif download and state.get("session_dead"):
+            rec["download_error"] = "session_expired"
         elif download and not state.get("session_dead"):
             ok, path, status = fetch_attachment(client, att, post_url, files_dir)
             if status == "session":
                 state["session_dead"] = True
+                state["fatal"] = True
+                state.setdefault("errors", []).append("session_expired")
+                rec["download_error"] = "session_expired"
                 print("     ⚠ 세션 만료 감지 — 이후 첨부는 '기록만'. 다른 곳에서 로그인했다면 다시 --auto 하세요.")
+            elif status:
+                rec["download_error"] = "download_" + status
+                state.setdefault("errors", []).append("attachment_download_failed")
             rec["downloaded"], rec["path"] = ok, path
             if ok and path:
                 try:
@@ -161,14 +171,26 @@ def collect_team_project(client, post_dir, post_url, post_html, download, state,
                 sub["attachments"], _, _ = save_attachments(
                     client, atts, post_url, post_dir / "submission_files", download, state, dl_index)
         except Exception as e:
-            print(f"     ⚠ 제출 레코드 조회 실패: {e}")
+            state["fatal"] = isinstance(e, api.SessionDead)
+            if state["fatal"]:
+                state["session_dead"] = True
+                state.setdefault("errors", []).append("session_expired")
+            else:
+                state.setdefault("errors", []).append("submission_request_failed")
+            print(f"     ⚠ 제출 레코드 조회 실패 ({type(e).__name__})")
     (post_dir / "submission.json").write_text(json.dumps(sub, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    if room_url:
+    if room_url and not state.get("fatal"):
         try:
             capture_html(post_dir / "teamroom", [(room_url, client.get(room_url, referer=post_url))], "팀룸")
+        except api.SessionDead:
+            state["session_dead"] = True
+            state["fatal"] = True
+            state.setdefault("errors", []).append("session_expired")
+            print("     ⚠ 팀룸 조회 중 세션 만료")
         except Exception as e:
-            print(f"     ⚠ 팀룸 캡처 실패: {e}")
+            state.setdefault("errors", []).append("teamroom_request_failed")
+            print(f"     ⚠ 팀룸 캡처 실패 ({type(e).__name__})")
     status = f"제출 {sub['submitted_at']}" if sub["submitted"] else "미제출"
     print(f"     · 팀프로젝트: {status} · 제출첨부 {len(sub['attachments'])}개"
           f" · 팀룸 {'저장' if room_url else '링크없음'}")
@@ -191,19 +213,33 @@ def drill_post(client, menu_dir, idx, post, form_url, download, state, dl_index)
         html = client.get(post["url"], referer=form_url)
     except api.SessionDead:
         state["session_dead"] = True
+        state["fatal"] = True
+        state.setdefault("errors", []).append("session_expired")
         print(f"     ✗ 글 {idx} — 세션 만료")
         return 0
     except Exception as e:
-        print(f"     ✗ 글 {idx} 조회 실패: {e}")
+        state.setdefault("errors", []).append("post_request_failed")
+        print(f"     ✗ 글 {idx} 조회 실패 ({type(e).__name__})")
         return 0
 
     capture_html(post_dir, [(post["url"], html)], post["title"])
 
-    if "project_view_form" in post["url"]:
-        collect_team_project(client, post_dir, post["url"], html, download, state, dl_index)
-        atts = parse.extract_attachments(html, post["url"])
-    else:
-        atts = client.post_attachments(html, post["url"])
+    try:
+        if "project_view_form" in post["url"]:
+            collect_team_project(client, post_dir, post["url"], html, download, state, dl_index)
+            atts = parse.extract_attachments(html, post["url"])
+        else:
+            atts = client.post_attachments(html, post["url"])
+    except api.SessionDead:
+        state["session_dead"] = True
+        state["fatal"] = True
+        state.setdefault("errors", []).append("session_expired")
+        print(f"     ✗ 글 {idx} 첨부 목록 — 세션 만료")
+        return 0
+    except Exception as e:
+        state.setdefault("errors", []).append("attachment_list_request_failed")
+        print(f"     ✗ 글 {idx} 첨부 목록 조회 실패 ({type(e).__name__})")
+        atts = []
 
     records, got, skipped = save_attachments(
         client, atts, post["url"], post_dir / "files", download, state, dl_index)
@@ -266,9 +302,18 @@ def collect_menu(client, label, form_url, referer, output_dir, download, max_pos
         print(f"     · {msg}")
     try:
         frames, form = menu_frames(client, form_path, referer)
+    except api.SessionDead:
+        state["session_dead"] = True
+        state["fatal"] = True
+        state.setdefault("errors", []).append("session_expired")
+        print(f"  ✗ {label}: 세션 만료")
+        return {"label": label, "url": form_url, "posts": 0, "attachments": 0,
+                "ok": False, "error": "session_expired"}
     except Exception as e:
-        print(f"  ✗ {label}: 조회 실패 {e}")
-        return {"label": label, "url": form_url, "posts": 0, "attachments": 0}
+        state.setdefault("errors", []).append("menu_request_failed")
+        print(f"  ✗ {label}: 조회 실패 ({type(e).__name__})")
+        return {"label": label, "url": form_url, "posts": 0, "attachments": 0,
+                "ok": False, "error": "menu_request_failed"}
 
     meta = capture_html(menu_dir, frames, label)
     base = api.ORIGIN + form_path.rsplit("/", 1)[0] + "/"
@@ -286,11 +331,14 @@ def collect_menu(client, label, form_url, referer, output_dir, download, max_pos
 
     dl_index = collect.load_downloaded_index(menu_dir)
     n_att = 0
+    error_count = len(state.get("errors", []))
     for i, post in enumerate(posts, 1):
         if state.get("fatal"):
             break
         n_att += drill_post(client, menu_dir, i, post, form_url, download, state, dl_index)
-    return {"label": label, "url": form_url, "posts": len(posts), "attachments": n_att}
+    errors = state.get("errors", [])[error_count:]
+    return {"label": label, "url": form_url, "posts": len(posts), "attachments": n_att,
+            "ok": not errors, "request_errors": len(errors), "errors": errors}
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -319,40 +367,61 @@ def collect_course(client, card, output_root, download, only, max_posts) -> dict
         menus = [(l, u) for (l, u) in menus if any(k in l for k in keys)]
     if not menus:
         print("  메뉴를 못 찾았습니다.")
-        return {"course": course, "menus": 0, "posts": 0, "attachments": 0}
+        return {"course": course, "menus": 0, "posts": 0, "attachments": 0,
+                "ok": False, "error": "no_menu_links", "menus_detail": []}
     print("  메뉴 %d개: %s" % (len(menus), ", ".join(l for l, _ in menus)))
 
-    state = {"session_dead": False}
+    state = {"session_dead": False, "fatal": False, "errors": []}
     discovered, summary = {}, []
     for label, url in menus:
+        if state.get("fatal"):
+            break
         summary.append(collect_menu(client, label, url, api.ORIGIN + submain,
                                     output_dir, download, max_posts, state))
         discovered[label] = url
     (output_dir / "_discovered_urls.json").write_text(json.dumps(discovered, ensure_ascii=False, indent=2), encoding="utf-8")
     (output_dir / "_index.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"course": course, "menus": len(summary), "posts": sum(s["posts"] for s in summary),
-            "attachments": sum(s["attachments"] for s in summary), "session_dead": state["session_dead"]}
+            "attachments": sum(s["attachments"] for s in summary), "session_dead": state["session_dead"],
+            "ok": all(s.get("ok", True) for s in summary), "menus_detail": summary}
 
 
-def run_api(output_dir: Path, download=True, only=None, max_posts=40, courses=None):
-    client = api.Client.from_keychain()
+def run_api(output_dir: Path, download=True, only=None, max_posts=40, courses=None, client=None):
+    if client is None:
+        client = api.Client.from_keychain()
+        try:
+            client.login()
+        except api.LoginError as e:
+            raise SystemExit(f"로그인 실패: {e}\n  → 브라우저로 직접 하려면 --browser")
+        print("✓ 로그인(HTTP)")
+    else:
+        print("✓ 브라우저 로그인 세션을 HTTP로 연결")
     try:
-        client.login()
+        cards = pick_courses(client.courses(), courses)
     except api.LoginError as e:
-        raise SystemExit(f"로그인 실패: {e}\n  → 브라우저로 직접 하려면 --browser")
-    print("✓ 로그인(API)")
-    cards = pick_courses(client.courses(), courses)
+        raise SystemExit(f"HTTP 세션 확인 실패: {e}")
     if not cards:
         raise SystemExit("대상 과목이 없습니다. --course 키워드를 확인하세요.")
     results = []
+    run_failed = False
     for card in cards:
         try:
             results.append(collect_course(client, card, output_dir, download, only, max_posts))
         except api.SessionDead:
+            run_failed = True
             print("⚠ 세션이 끊겼습니다(다른 곳에서 로그인했을 수 있음) — 중단합니다.")
             break
     tot = lambda k: sum(r.get(k, 0) for r in results)
-    print(f"\n완료: 과목 {len(results)}개 · 게시물 {tot('posts')}개 · 첨부 {tot('attachments')}개")
-    if any(r.get("session_dead") for r in results):
-        print("⚠️ 진행 중 세션이 만료돼 일부 첨부는 기록만 했습니다. 다시 실행하면 이어서 받습니다.")
+    failed_menus = sum(not menu.get("ok", result.get("ok", True)) for result in results
+                       for menu in result.get("menus_detail", []))
+    partial = run_failed or any(not r.get("ok", True) or r.get("session_dead") for r in results) or failed_menus or any(
+        menu.get("request_errors", 0) for result in results for menu in result.get("menus_detail", []))
+    print(f"\n{'부분 수집' if partial else '완료'}: 과목 {len(results)}개 · 게시물 {tot('posts')}개 · 첨부 {tot('attachments')}개")
+    if partial:
+        print("⚠️ 일부 HTTP 요청이 실패해 부분 수집입니다. _index.json의 ok/error 항목을 확인하고 다시 실행하세요.")
+    token_only = sum(1 for p in output_dir.rglob("attachments.json")
+                     for item in json.loads(p.read_text(encoding="utf-8"))
+                     if item.get("download_error") == "browser_token_download_unresolved")
+    if token_only and download:
+        print(f"ℹ️ 브라우저 JS 토큰 첨부 {token_only}개는 직접 다운로드 URL이 없어 목록만 저장했습니다.")
     return results
