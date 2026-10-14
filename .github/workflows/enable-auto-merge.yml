@@ -35,12 +35,19 @@ jobs:
                 repo,
                 pull_number: pullRequest.number,
               });
+              if (data.state !== "open" || data.head.sha !== context.payload.workflow_run.head_sha) {
+                core.info(`PR #${pullRequest.number}: CI가 확인한 head와 현재 PR 상태가 달라 건너뜁니다.`);
+                continue;
+              }
+
               const pullRequestId = data.node_id;
               const state = await github.graphql(
                 `query($id: ID!) {
                   node(id: $id) {
                     ... on PullRequest {
                       isDraft
+                      state
+                      mergeStateStatus
                       autoMergeRequest { enabledAt }
                     }
                   }
@@ -48,7 +55,27 @@ jobs:
                 { id: pullRequestId }
               );
 
-              if (state.node.isDraft || state.node.autoMergeRequest) continue;
+              if (state.node.isDraft || state.node.state !== "OPEN" || state.node.autoMergeRequest) continue;
+
+              if (state.node.mergeStateStatus === "CLEAN") {
+                const result = await github.graphql(
+                  `mutation($id: ID!, $mergeMethod: PullRequestMergeMethod!, $expectedHeadOid: GitObjectID!) {
+                    mergePullRequest(input: {
+                      pullRequestId: $id,
+                      mergeMethod: $mergeMethod,
+                      expectedHeadOid: $expectedHeadOid
+                    }) {
+                      pullRequest { number merged }
+                    }
+                  }`,
+                  { id: pullRequestId, mergeMethod: "MERGE", expectedHeadOid: data.head.sha }
+                );
+                if (!result.mergePullRequest.pullRequest.merged) {
+                  throw new Error(`PR #${pullRequest.number} did not merge despite clean status.`);
+                }
+                core.info(`PR #${pullRequest.number}: CI 통과 후 이미 clean 상태여서 바로 병합했습니다.`);
+                continue;
+              }
 
               await github.graphql(
                 `mutation($id: ID!, $mergeMethod: PullRequestMergeMethod!) {
