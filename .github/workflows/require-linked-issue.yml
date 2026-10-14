@@ -3,6 +3,8 @@ name: Require linked issue
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened, ready_for_review]
+  issues:
+    types: [opened, edited]
 
 permissions:
   issues: read
@@ -15,7 +17,46 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const body = context.payload.pull_request.body ?? "";
+            const isIssue = context.eventName === "issues";
+            const body = isIssue
+              ? context.payload.issue.body ?? ""
+              : context.payload.pull_request.body ?? "";
+            const requiredPrSections = ["변경", "검증"];
+            const requiredIssueSections = ["배경", "범위", "완료 조건", "비범위"];
+
+            function sectionContent(markdown, heading) {
+              const match = new RegExp(`^##\\s+${heading}\\s*$`, "im").exec(markdown);
+              if (!match) return null;
+
+              const afterHeading = markdown.slice(match.index + match[0].length);
+              const nextHeading = afterHeading.search(/^##\s+/m);
+              const content = nextHeading < 0 ? afterHeading : afterHeading.slice(0, nextHeading);
+              return content.replace(/<!--[\s\S]*?-->/g, "").trim();
+            }
+
+            function missingSections(markdown, headings) {
+              return headings.filter((heading) => !sectionContent(markdown, heading));
+            }
+
+            if (isIssue) {
+              const missingIssueSections = missingSections(body, requiredIssueSections);
+              if (missingIssueSections.length > 0) {
+                core.setFailed(
+                  `이슈 양식이 비어 있습니다. 다음 제목 아래에 내용을 작성하세요: ${missingIssueSections.map((h) => `## ${h}`).join(", ")}`
+                );
+                return;
+              }
+              core.info("이슈 양식 확인 완료");
+              return;
+            }
+
+            const missingPrSections = missingSections(body, requiredPrSections);
+            if (missingPrSections.length > 0) {
+              core.setFailed(
+                `PR 본문 양식이 비어 있습니다. 다음 제목 아래에 내용을 작성하세요: ${missingPrSections.map((h) => `## ${h}`).join(", ")}`
+              );
+              return;
+            }
             const refs = [...body.matchAll(/\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s*:?\s+#(\d+)\b/gi)]
               .map((match) => Number(match[1]));
             const issueNumbers = [...new Set(refs)];
@@ -47,6 +88,14 @@ jobs:
                 core.setFailed(`#${issue_number}은 이슈가 아니라 PR입니다. 실제 이슈 번호를 연결하세요.`);
                 return;
               }
+
+              const missingIssueSections = missingSections(issue.body ?? "", requiredIssueSections);
+              if (missingIssueSections.length > 0) {
+                core.setFailed(
+                  `연결된 이슈 #${issue_number}의 양식이 비어 있습니다. 다음 제목 아래에 내용을 작성하세요: ${missingIssueSections.map((h) => `## ${h}`).join(", ")}`
+                );
+                return;
+              }
             }
 
-            core.info(`연결된 이슈 확인: ${issueNumbers.map((n) => `#${n}`).join(", ")}`);
+            core.info(`PR 및 연결 이슈 양식 확인 완료: ${issueNumbers.map((n) => `#${n}`).join(", ")}`);
